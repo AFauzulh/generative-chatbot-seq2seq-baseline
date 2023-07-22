@@ -29,10 +29,11 @@ from sklearn.model_selection import train_test_split
 
 # from models.LSTMBahdanau import Encoder, Decoder, Seq2Seq
 # import models as Model
-from models.BiGRU import Encoder, Decoder, Seq2Seq
+from models.BiGRULuong import Encoder, Decoder, Seq2Seq
+from models.Transformer import Transformer
 from utils.tokenizer import Tokenizer, pad_sequences, MyData
 from utils.preprocess import preprocess_1, preprocess_2
-from trainer import train, loss_function, sort_within_batch
+from trainer import train, loss_function, sort_within_batch, train_transformer
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -43,7 +44,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=128, help='input batch size')
     parser.add_argument('--hidden_size', type=int, default=1024, help='the size of the LSTM hidden state')
     parser.add_argument('--embedding_dim', type=int, default=512, help='the size of the embedding dimension')
-    parser.add_argument('--dropout', type=int, default=.5, help='dropout ratio')
+    parser.add_argument('--dropout', type=float, default=.5, help='dropout ratio')
     parser.add_argument('--num_layers', type=int, default=1, help='number of layer in LSTM cell')
     parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs to train for')
     parser.add_argument('--saved_model', default='', help="path to model to continue training")
@@ -55,6 +56,8 @@ if __name__ == '__main__':
     parser.add_argument('--tokenizer_path', type=str, help='tokenizer path')
     parser.add_argument('--dataset', type=str, required=True, help='dataset')
     parser.add_argument('--wandb_log', action='store_true', help='using wandb')
+    parser.add_argument('--transformer', action='store_true', help='using Transformer seq2seq model')
+    parser.add_argument('--resume_train', action='store_true', help='resume training')
     
     opt = parser.parse_args()
     
@@ -64,7 +67,7 @@ if __name__ == '__main__':
     if not opt.exp_name:
         opt.exp_name = f'{opt.model}-{opt.dataset}'
 #         opt.exp_name += f'-MaxLen{opt.max_length}'
-        
+    
     os.makedirs(f'./saved_models/{opt.exp_name}', exist_ok=True)
     
     with open(f'./saved_models/{opt.exp_name}/opt.txt', 'a') as opt_file:
@@ -140,19 +143,42 @@ if __name__ == '__main__':
     train_dataset = DataLoader(train_data, batch_size=BATCH_SIZE, drop_last=True, shuffle=False)
     test_dataset = DataLoader(test_data, batch_size=BATCH_SIZE, drop_last=True, shuffle=False)
     
-#     if opt.model == 'BiLSTM':
-#         Encoder = Model.BiLSTM.Encoder
-#         Decoder = Model.BiLSTM.Decoder
-#         Seq2Seq = Model.BiLSTM.Seq2Seq
-#     else:
-#         raise Exception("Model name invalid")
-    
-    encoder_net = Encoder(INPUT_SIZE_ENCODER, EMBEDDING_DIM, HIDDEN_SIZE, 
-                  NUM_LAYERS, DROPOUT, pretrained_word_embedding=False, embedding_matrix=None, freeze=False).to(device)
+    if opt.transformer:
+        print("Using Transformer Seq2Seq Model")
+        NUM_HEADS = 8
+        NUM_ENCODER_LAYERS = 4
+        NUM_DECODER_LAYERS = 4
+        FORWARD_EXPANSIONS = 2
+        SRC_PAD_IDX = tokenizer.word2index['<PAD>']
+        
+        model = Transformer(
+            EMBEDDING_DIM,
+            INPUT_SIZE_ENCODER,
+            INPUT_SIZE_DECODER,
+            SRC_PAD_IDX,
+            NUM_HEADS,
+            NUM_ENCODER_LAYERS,
+            NUM_DECODER_LAYERS,
+            FORWARD_EXPANSIONS,
+            DROPOUT,
+            max_len,
+            device
+        ).to(device)
+        
+        if opt.resume_train:
+            model.load_state_dict(torch.load(f'./saved_models/{opt.exp_name}/model.pth'))
+        
+        train_transformer(model=model, num_epochs=opt.num_epochs, lr=opt.lr, tokenizer=tokenizer, train_dataset=train_dataset, val_dataset=test_dataset, save_dir=opt.exp_name, RANDOM_SEED=RANDOM_SEED, device=device, opt=opt, crit='CEL')
+        
+    else:
+        encoder_net = Encoder(INPUT_SIZE_ENCODER, EMBEDDING_DIM, HIDDEN_SIZE, 
+                      NUM_LAYERS, DROPOUT, pretrained_word_embedding=False, embedding_matrix=None, freeze=False).to(device)
 
-    decoder_net = Decoder(INPUT_SIZE_DECODER, EMBEDDING_DIM, HIDDEN_SIZE, 
-                          OUTPUT_SIZE, NUM_LAYERS, DROPOUT, pretrained_word_embedding=False, embedding_matrix=None, freeze=False).to(device)
+        decoder_net = Decoder(INPUT_SIZE_DECODER, EMBEDDING_DIM, HIDDEN_SIZE, 
+                              OUTPUT_SIZE, NUM_LAYERS, DROPOUT, pretrained_word_embedding=False, embedding_matrix=None, freeze=False).to(device)
 
-    model = Seq2Seq(encoder_net, decoder_net, vocab_len=VOCAB_LEN).to(device)
-    
-    train(model=model, num_epochs=opt.num_epochs, lr=opt.lr, tokenizer=tokenizer, train_dataset=train_dataset, val_dataset=test_dataset, save_dir=opt.exp_name, RANDOM_SEED=RANDOM_SEED, device=device, opt=opt, crit='CEL')
+        model = Seq2Seq(encoder_net, decoder_net, vocab_len=VOCAB_LEN).to(device)
+        if opt.resume_train:
+            model.load_state_dict(torch.load(f'./saved_models/{opt.exp_name}/model.pth'))
+        
+        train(model=model, num_epochs=opt.num_epochs, lr=opt.lr, tokenizer=tokenizer, train_dataset=train_dataset, val_dataset=test_dataset, save_dir=opt.exp_name, RANDOM_SEED=RANDOM_SEED, device=device, opt=opt, crit='CEL')

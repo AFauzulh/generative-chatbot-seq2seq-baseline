@@ -8,6 +8,110 @@ import torch.optim as optim
 from tqdm import tqdm
 import wandb
 
+def train_transformer(model, num_epochs, lr, tokenizer, train_dataset, val_dataset, save_dir, RANDOM_SEED, device, opt, crit='CEL'):
+    random.seed(RANDOM_SEED)
+    np.random.seed(RANDOM_SEED)
+    torch.manual_seed(RANDOM_SEED)
+    torch.cuda.manual_seed(RANDOM_SEED)
+    torch.backends.cudnn.deterministic = True
+    
+    np.random.seed(RANDOM_SEED)
+    torch.manual_seed(RANDOM_SEED)
+    
+    pad_idx = tokenizer.word2index["<PAD>"]
+    if crit == "CTC":
+        criterion = nn.CTCLoss()
+    else:
+        criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+        
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    train_losses = []
+    val_losses = []
+
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
+    best_val_loss = float('inf')
+    
+    if opt.wandb_log:
+        wandb.init(
+            project="tesis-chatbot-siet",
+            entity='alfirsa-lab',
+            name=f"{opt.exp_name}",
+            resume=opt.resume_train
+        )
+    
+    for epoch in range(num_epochs):
+        num_batch = 0
+        val_num_batch = 0
+        batch_loss = 0
+        val_batch_loss = 0
+        
+        model.train()
+        for (batch_idx, (X_train, y_train, input_len, target_len)) in enumerate(bar := tqdm(train_dataset)):
+            X_train = X_train.permute(1,0).to(device)
+            y_train = y_train.permute(1,0).to(device)
+            
+            inp_data = X_train.to(device)
+            target = y_train.to(device)
+            
+            output = model(inp_data, target[:-1, :])
+            output = output.reshape(-1, output.shape[2])
+            target = target[1:].reshape(-1)
+            
+            optimizer.zero_grad()
+            loss = criterion(output, target)
+            loss.backward()
+            optimizer.step()
+
+            loss = loss.detach()
+            batch_loss += loss
+
+            bar.set_description(f'Train Seq2Seq Model '
+                                         f'[train_loss={loss:.4f}'
+                                         )
+            num_batch+=1
+            
+        with torch.no_grad():
+            model.eval()
+            for (batch_idx, (X_val, y_val, input_len, target_len)) in enumerate(val_dataset):
+                X_val = X_val.permute(1,0)
+                y_val = y_val.permute(1,0)
+                
+                val_inp_data = X_val.to(device)
+                val_target = y_val.to(device)
+                
+                output = model(val_inp_data, val_target[:-1, :])
+                output = output.reshape(-1, output.shape[2])
+                val_target = val_target[1:].reshape(-1)
+                
+                val_loss = criterion(output, val_target)
+                val_batch_loss += val_loss.detach()
+                
+                val_num_batch+=1
+        
+        train_loss_ = batch_loss/num_batch
+        train_losses.append(train_loss_)
+        
+        val_loss_ = val_batch_loss/val_num_batch
+        val_losses.append(val_loss_)
+        
+        if val_loss_ < best_val_loss:
+            torch.save(model.state_dict(), f'./saved_models/{opt.exp_name}/best_loss.pth')
+            
+        torch.save(model.state_dict(), f'./saved_models/{opt.exp_name}/model.pth')
+
+        scheduler.step(val_loss_)
+        
+        if opt.wandb_log:
+            wandb.log({"loss": train_loss_, "val_loss": val_loss_})
+        
+        print(
+                f'Epochs: {epoch + 1} | Train Loss: {train_loss_:.3f} \
+                | Val Loss: {val_loss_:.3f}\n')
+    
+    if opt.wandb_log:
+        wandb.finish()
+
 def train(model, num_epochs, lr, tokenizer, train_dataset, val_dataset, save_dir, RANDOM_SEED, device, opt, crit='CEL'):
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
@@ -70,6 +174,7 @@ def train(model, num_epochs, lr, tokenizer, train_dataset, val_dataset, save_dir
             # target shape = (target_length, batch_size))
 
             # print(inp_data.shape, target.shape)
+            
             output = model(inp_data, target, input_lengths)
             # # output shape = (target_length, batch_size, output_dim)
             
@@ -82,12 +187,17 @@ def train(model, num_epochs, lr, tokenizer, train_dataset, val_dataset, save_dir
             # print(output.shape, target.shape)
             optimizer.zero_grad()
             loss = loss_function(real=target, pred=output, input_lengths=input_lengths, target_lengths=target_lengths, criterion=criterion, crit=crit)
+            loss.backward()
+            optimizer.step()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=opt.grad_clip)
+            
+            loss = loss.detach()
             batch_loss += loss
 
-            loss.backward()
+            # loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=opt.grad_clip)
-            optimizer.step()
+            #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=opt.grad_clip)
+            #optimizer.step()
             bar.set_description(f'Train Seq2Seq Model '
                                          f'[train_loss={loss:.4f}'
                                          )
@@ -110,7 +220,7 @@ def train(model, num_epochs, lr, tokenizer, train_dataset, val_dataset, save_dir
             target = target[1:].reshape(-1)
 
             val_loss = loss_function(real=target, pred=output, input_lengths=input_lengths, target_lengths=target_lengths, criterion=criterion, crit=crit)
-            val_batch_loss += val_loss
+            val_batch_loss += val_loss.detach()
             
             val_num_batch+=1
             
